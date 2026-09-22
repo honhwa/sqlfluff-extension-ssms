@@ -34,7 +34,7 @@ Integrates SQLFluff (the SQL linter and formatter) into SQL Server Management St
 1. Download `SqlFluff.Ssms.vsix` from Releases
 2. Double-click the file or run:
    ```bash
-   VSIXInstaller.exe SqlFluff.Ssms.vsix
+   .\SqlFluff.Ssms.vsix
    ```
 3. Restart SSMS
 
