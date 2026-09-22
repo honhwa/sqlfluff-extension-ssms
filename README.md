@@ -67,3 +67,38 @@ Output: `bin\Release\SqlFluff.Ssms.vsix`
 ## License
 
 MIT
+
+## Contributing
+
+This is an open-source project. We welcome bug reports, feature requests, and pull requests from the community.
+
+- **Report bugs**: [GitHub Issues](../../issues)
+- **Suggest features**: [GitHub Discussions or Issues](../../issues)
+- **Contribute code**: See [CONTRIBUTING.md](CONTRIBUTING.md)
+
+## Code of Conduct
+
+All contributors are expected to follow the [Code of Conduct](/.github/CODE_OF_CONDUCT.md).
+
+## Changelog
+
+All releases are published on the [Releases page](../../releases). Each release includes:
+- The compiled VSIX extension
+- Release notes with installation instructions
+- Change summary
+
+### Release Process
+
+1. Update the version in `src\SqlFluff.Ssms\Properties\AssemblyInfo.cs`
+2. Commit and push to `main`
+3. An automated workflow creates a GitHub Release with the VSIX artifact
+
+## Support & Feedback
+
+- **Questions**: Open a [GitHub Issue](../../issues)
+- **Bugs**: Report with steps to reproduce
+- **Feature ideas**: Share in Issues or Discussions
+
+---
+
+**Happy linting! 🎯**
