@@ -121,8 +121,27 @@ namespace SqlFluff.Ssms.Services
             }
         }
 
-        public async Task FixAsync(IWpfTextView view, ITextBuffer buffer, string path)
+        public Task FixAsync(IWpfTextView view, ITextBuffer buffer, string path)
         {
+            return RewriteAsync(view, buffer, path, RewriteMode.Fix);
+        }
+
+        public Task FormatAsync(IWpfTextView view, ITextBuffer buffer, string path)
+        {
+            return RewriteAsync(view, buffer, path, RewriteMode.Format);
+        }
+
+        private enum RewriteMode
+        {
+            Fix,
+            Format,
+        }
+
+        private async Task RewriteAsync(IWpfTextView view, ITextBuffer buffer, string path, RewriteMode mode)
+        {
+            string verb = mode == RewriteMode.Format ? "format" : "fix";
+            string verbCapitalized = mode == RewriteMode.Format ? "Format" : "Fix";
+
             await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
 
             if (!buffer.CheckEditAccess())
@@ -149,16 +168,18 @@ namespace SqlFluff.Ssms.Services
             string original = snapshot.GetText(target);
             if (string.IsNullOrWhiteSpace(original))
             {
-                OutputLog.SetStatus("SQLFluff: nothing to fix.");
+                OutputLog.SetStatus("SQLFluff: nothing to " + verb + ".");
                 return;
             }
 
-            OutputLog.SetStatus("SQLFluff: fixing...");
+            OutputLog.SetStatus("SQLFluff: " + (mode == RewriteMode.Format ? "formatting..." : "fixing..."));
 
-            string fixedText;
+            string rewritten;
             try
             {
-                fixedText = await Task.Run(() => SqlFluffRunner.FixAsync(original, path, settings, CancellationToken.None));
+                rewritten = mode == RewriteMode.Format
+                    ? await Task.Run(() => SqlFluffRunner.FormatAsync(original, path, settings, CancellationToken.None))
+                    : await Task.Run(() => SqlFluffRunner.FixAsync(original, path, settings, CancellationToken.None));
             }
             catch (SqlFluffException ex)
             {
@@ -171,26 +192,26 @@ namespace SqlFluff.Ssms.Services
 
             if (buffer.CurrentSnapshot.Version.VersionNumber != snapshot.Version.VersionNumber)
             {
-                ReportFailure("The document changed while SQLFluff was running. Run Fix again.", userInitiated: true);
+                ReportFailure("The document changed while SQLFluff was running. Run " + verbCapitalized + " again.", userInitiated: true);
                 return;
             }
 
             string newline = DominantNewline(snapshot);
-            fixedText = fixedText.Replace("\r\n", "\n").Replace("\n", newline);
+            rewritten = rewritten.Replace("\r\n", "\n").Replace("\n", newline);
             if (isSelection && !EndsWithNewline(original))
             {
-                fixedText = fixedText.TrimEnd('\r', '\n');
+                rewritten = rewritten.TrimEnd('\r', '\n');
             }
 
-            if (string.Equals(fixedText, original, StringComparison.Ordinal))
+            if (string.Equals(rewritten, original, StringComparison.Ordinal))
             {
-                OutputLog.SetStatus("SQLFluff: nothing to fix.");
+                OutputLog.SetStatus("SQLFluff: nothing to " + verb + ".");
                 await LintAsync(buffer, path, userInitiated: false);
                 return;
             }
 
-            ApplyMinimalEdit(buffer, target.Start, original, fixedText);
-            OutputLog.SetStatus("SQLFluff: fixes applied. Press Ctrl+S to save.");
+            ApplyMinimalEdit(buffer, target.Start, original, rewritten);
+            OutputLog.SetStatus("SQLFluff: " + verb + " applied. Press Ctrl+S to save.");
             await LintAsync(buffer, path, userInitiated: false);
         }
 

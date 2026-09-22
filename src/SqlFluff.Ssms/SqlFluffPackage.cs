@@ -2,6 +2,7 @@ using System;
 using System.ComponentModel.Design;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.VisualStudio;
 using Microsoft.VisualStudio.ComponentModelHost;
 using Microsoft.VisualStudio.Editor;
@@ -31,6 +32,13 @@ namespace SqlFluff.Ssms
         private IVsRunningDocumentTable _rdt;
         private uint _rdtCookie;
 
+        // Used by MEF-composed editor components (e.g. the Light Bulb suggested-actions source) that
+        // have no other way to reach this package's services.
+        internal static SqlFluffPackage Instance { get; private set; }
+
+        internal LintService LintService => _lint;
+        internal EditorServices EditorServices => _editor;
+
         internal SqlFluffSettings GetSettings()
         {
             ThreadHelper.ThrowIfNotOnUIThread();
@@ -40,6 +48,7 @@ namespace SqlFluff.Ssms
         protected override async Task InitializeAsync(CancellationToken cancellationToken, IProgress<ServiceProgressData> progress)
         {
             await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+            Instance = this;
 
             var componentModel = (IComponentModel)await GetServiceAsync(typeof(SComponentModel));
             _editor = new EditorServices(
@@ -53,8 +62,9 @@ namespace SqlFluff.Ssms
             var commands = await GetServiceAsync(typeof(IMenuCommandService)) as OleMenuCommandService;
             if (commands != null)
             {
-                AddCommand(commands, PackageIds.CmdLint, (s, e) => RunOnActiveDocument(false), requiresSql: true);
-                AddCommand(commands, PackageIds.CmdFix, (s, e) => RunOnActiveDocument(true), requiresSql: true);
+                AddCommand(commands, PackageIds.CmdLint, (s, e) => RunOnActiveDocument(EditorAction.Lint), requiresSql: true);
+                AddCommand(commands, PackageIds.CmdFix, (s, e) => RunOnActiveDocument(EditorAction.Fix), requiresSql: true);
+                AddCommand(commands, PackageIds.CmdFormat, (s, e) => RunOnActiveDocument(EditorAction.Format), requiresSql: true);
                 AddCommand(commands, PackageIds.CmdClear, (s, e) => ClearActiveDocument(), requiresSql: true);
                 AddCommand(commands, PackageIds.CmdOptions, (s, e) => ShowOptionPage(typeof(SqlFluffOptionsPage)), requiresSql: false);
             }
@@ -63,6 +73,25 @@ namespace SqlFluff.Ssms
             _documentEvents = new DocumentEvents(this, _rdt, _editor, _lint);
             _rdt.AdviseRunningDocTableEvents(_documentEvents, out _rdtCookie);
             _documentEvents.AttachToOpenDocuments();
+
+            // Non-blocking: warn once if sqlfluff isn't reachable, instead of waiting for the first Lint/Fix to fail.
+            JoinableTaskFactory.RunAsync(CheckSqlFluffAvailabilityAsync).Task.FileAndForget("sqlfluff/availability-check");
+        }
+
+        private async Task CheckSqlFluffAvailabilityAsync()
+        {
+            await JoinableTaskFactory.SwitchToMainThreadAsync();
+            SqlFluffSettings settings = GetSettings();
+
+            string error = await Task.Run(() => SqlFluffRunner.CheckAvailabilityAsync(settings, CancellationToken.None));
+            if (error == null)
+            {
+                return;
+            }
+
+            await JoinableTaskFactory.SwitchToMainThreadAsync();
+            OutputLog.Write(error);
+            OutputLog.SetStatus("SQLFluff: not found. Install with 'pip install sqlfluff' or set its path in Tools > Options > SQLFluff.");
         }
 
         private void AddCommand(OleMenuCommandService service, int id, EventHandler handler, bool requiresSql)
@@ -80,7 +109,14 @@ namespace SqlFluff.Ssms
             service.AddCommand(command);
         }
 
-        private void RunOnActiveDocument(bool fix)
+        private enum EditorAction
+        {
+            Lint,
+            Fix,
+            Format,
+        }
+
+        private void RunOnActiveDocument(EditorAction action)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             if (!_editor.TryGetActiveSqlView(out IWpfTextView view, out ITextBuffer buffer, out string path))
@@ -89,11 +125,21 @@ namespace SqlFluff.Ssms
                 return;
             }
 
-            JoinableTaskFactory
-                .RunAsync(() => fix
-                    ? _lint.FixAsync(view, buffer, path)
-                    : _lint.LintAsync(buffer, path, userInitiated: true))
-                .Task.FileAndForget(fix ? "sqlfluff/fix" : "sqlfluff/lint-command");
+            Func<Task> operation;
+            switch (action)
+            {
+                case EditorAction.Fix:
+                    operation = () => _lint.FixAsync(view, buffer, path);
+                    break;
+                case EditorAction.Format:
+                    operation = () => _lint.FormatAsync(view, buffer, path);
+                    break;
+                default:
+                    operation = () => _lint.LintAsync(buffer, path, userInitiated: true);
+                    break;
+            }
+
+            JoinableTaskFactory.RunAsync(operation).Task.FileAndForget("sqlfluff/" + action.ToString().ToLowerInvariant());
         }
 
         private void ClearActiveDocument()
@@ -119,6 +165,11 @@ namespace SqlFluff.Ssms
 
                 _errors?.Dispose();
                 _errors = null;
+
+                if (Instance == this)
+                {
+                    Instance = null;
+                }
             }
 
             base.Dispose(disposing);

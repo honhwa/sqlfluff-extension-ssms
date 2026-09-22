@@ -36,12 +36,24 @@ namespace SqlFluff.Ssms.Core
             return ParseLintOutput(result.StdOut, result);
         }
 
-        public static async Task<string> FixAsync(
+        public static Task<string> FixAsync(
             string text, string filePath, SqlFluffSettings settings, CancellationToken ct)
         {
-            ProcessResult result = await RunAsync("fix", text, filePath, settings, ct).ConfigureAwait(false);
+            return RewriteAsync("fix", text, filePath, settings, ct);
+        }
 
-            // fix: exit code 1 only means "some violations could not be fixed"; stdout still holds the fixed SQL.
+        public static Task<string> FormatAsync(
+            string text, string filePath, SqlFluffSettings settings, CancellationToken ct)
+        {
+            return RewriteAsync("format", text, filePath, settings, ct);
+        }
+
+        private static async Task<string> RewriteAsync(
+            string verb, string text, string filePath, SqlFluffSettings settings, CancellationToken ct)
+        {
+            ProcessResult result = await RunAsync(verb, text, filePath, settings, ct).ConfigureAwait(false);
+
+            // fix/format: exit code 1 only means "some violations could not be fixed"; stdout still holds the rewritten SQL.
             if (result.ExitCode > 1)
             {
                 throw new SqlFluffException(Describe(result));
@@ -60,6 +72,69 @@ namespace SqlFluff.Ssms.Core
             lock (CacheLock)
             {
                 _cachedLaunch = null;
+            }
+        }
+
+        // Returns null when sqlfluff is reachable and runnable, otherwise a user-facing description of the problem.
+        public static async Task<string> CheckAvailabilityAsync(SqlFluffSettings settings, CancellationToken ct)
+        {
+            Launch launch;
+            try
+            {
+                launch = Resolve(settings);
+            }
+            catch (SqlFluffException ex)
+            {
+                return ex.Message;
+            }
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = launch.FileName,
+                Arguments = (string.IsNullOrEmpty(launch.PrefixArguments) ? string.Empty : launch.PrefixArguments + " ") + "--version",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                RedirectStandardInput = true,
+            };
+
+            try
+            {
+                using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+                using (var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token))
+                using (var process = new Process { StartInfo = psi })
+                {
+                    process.Start();
+                    process.StandardInput.Close();
+
+                    using (linked.Token.Register(() => TryKill(process)))
+                    {
+                        string stderr = await process.StandardError.ReadToEndAsync().ConfigureAwait(false);
+                        await Task.Run(() => process.WaitForExit()).ConfigureAwait(false);
+
+                        if (timeout.IsCancellationRequested)
+                        {
+                            return "Checking for SQLFluff timed out (" + launch.FileName + ").";
+                        }
+
+                        if (process.ExitCode != 0)
+                        {
+                            ResetCache();
+                            string detail = stderr.Trim();
+                            return "SQLFluff did not run correctly (" + launch.FileName + ")" +
+                                   (detail.Length > 0 ? ": " + detail : ".");
+                        }
+
+                        return null;
+                    }
+                }
+            }
+            catch (System.ComponentModel.Win32Exception ex)
+            {
+                ResetCache();
+                return "Could not start SQLFluff (" + launch.FileName + "): " + ex.Message +
+                       ". Install it with 'pip install sqlfluff' or set its path in Tools > Options > SQLFluff.";
             }
         }
 

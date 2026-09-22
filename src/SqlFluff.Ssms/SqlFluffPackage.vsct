@@ -56,12 +56,22 @@
         <Icon guid="ImageCatalogGuid" id="FormatDocument" />
         <CommandFlag>IconIsMoniker</CommandFlag>
         <Strings>
-          <ButtonText>&amp;Fix / Format (Selection or Document)</ButtonText>
-          <ToolTipText>Apply SQLFluff fixes to the selection, or to the whole document when nothing is selected</ToolTipText>
+          <ButtonText>&amp;Fix (Selection or Document)</ButtonText>
+          <ToolTipText>Apply all SQLFluff fixes to the selection, or to the whole document when nothing is selected</ToolTipText>
         </Strings>
       </Button>
 
-      <Button guid="guidSqlFluffCmdSet" id="cmdidClear" priority="0x0102" type="Button">
+      <Button guid="guidSqlFluffCmdSet" id="cmdidFormat" priority="0x0102" type="Button">
+        <Parent guid="guidSqlFluffCmdSet" id="SubMenuActionsGroup" />
+        <Icon guid="ImageCatalogGuid" id="FormatSelection" />
+        <CommandFlag>IconIsMoniker</CommandFlag>
+        <Strings>
+          <ButtonText>F&amp;ormat (Selection or Document)</ButtonText>
+          <ToolTipText>Apply SQLFluff's safe formatting rules only (layout/whitespace) to the selection, or to the whole document when nothing is selected</ToolTipText>
+        </Strings>
+      </Button>
+
+      <Button guid="guidSqlFluffCmdSet" id="cmdidClear" priority="0x0103" type="Button">
         <Parent guid="guidSqlFluffCmdSet" id="SubMenuActionsGroup" />
         <Icon guid="ImageCatalogGuid" id="ClearWindowContent" />
         <CommandFlag>IconIsMoniker</CommandFlag>
@@ -91,13 +101,19 @@
     <CommandPlacement guid="guidSqlFluffCmdSet" id="cmdidFix" priority="0x0101">
       <Parent guid="guidSqlFluffCmdSet" id="ContextMenuGroup" />
     </CommandPlacement>
+    <CommandPlacement guid="guidSqlFluffCmdSet" id="cmdidFormat" priority="0x0102">
+      <Parent guid="guidSqlFluffCmdSet" id="ContextMenuGroup" />
+    </CommandPlacement>
     <CommandPlacement guid="guidSqlFluffCmdSet" id="cmdidLint" priority="0x0100">
       <Parent guid="guidSqlFluffCmdSet" id="ToolbarGroup" />
     </CommandPlacement>
     <CommandPlacement guid="guidSqlFluffCmdSet" id="cmdidFix" priority="0x0101">
       <Parent guid="guidSqlFluffCmdSet" id="ToolbarGroup" />
     </CommandPlacement>
-    <CommandPlacement guid="guidSqlFluffCmdSet" id="cmdidClear" priority="0x0102">
+    <CommandPlacement guid="guidSqlFluffCmdSet" id="cmdidFormat" priority="0x0102">
+      <Parent guid="guidSqlFluffCmdSet" id="ToolbarGroup" />
+    </CommandPlacement>
+    <CommandPlacement guid="guidSqlFluffCmdSet" id="cmdidClear" priority="0x0103">
       <Parent guid="guidSqlFluffCmdSet" id="ToolbarGroup" />
     </CommandPlacement>
   </CommandPlacements>
@@ -105,6 +121,7 @@
   <KeyBindings>
     <KeyBinding guid="guidSqlFluffCmdSet" id="cmdidLint" editor="guidVSStd97" key1="K" mod1="Control" key2="L" mod2="Control Shift" />
     <KeyBinding guid="guidSqlFluffCmdSet" id="cmdidFix" editor="guidVSStd97" key1="K" mod1="Control" key2="F" mod2="Control Shift" />
+    <KeyBinding guid="guidSqlFluffCmdSet" id="cmdidFormat" editor="guidVSStd97" key1="K" mod1="Control" key2="D" mod2="Control Shift" />
   </KeyBindings>
 
   <Symbols>
@@ -122,6 +139,7 @@
       <IDSymbol name="cmdidFix" value="0x0101" />
       <IDSymbol name="cmdidClear" value="0x0102" />
       <IDSymbol name="cmdidOptions" value="0x0103" />
+      <IDSymbol name="cmdidFormat" value="0x0104" />
     </GuidSymbol>
   </Symbols>
 
