@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  release:
+    runs-on: windows-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '10.0.401'
+    
+    - name: Restore & Build
+      run: |
+        $env:MSBuildSDKsPath = 'C:\Program Files\dotnet\sdk\10.0.401\Sdks'
+        $env:DOTNET_HOST_PATH = 'C:\Program Files\dotnet\dotnet.exe'
+        $env:DOTNET_ROOT = 'C:\Program Files\dotnet'
+        dotnet restore src/SqlFluff.Ssms/SqlFluff.Ssms.csproj
+        $msb = 'C:\Program Files\Microsoft SQL Server Management Studio 22\Release\MSBuild\Current\Bin\amd64\MSBuild.exe'
+        & $msb src/SqlFluff.Ssms/SqlFluff.Ssms.csproj /p:Configuration=Release /v:minimal /nologo
+      shell: pwsh
+    
+    - name: Extract Version
+      id: version
+      run: |
+        [xml]$xml = Get-Content src/SqlFluff.Ssms/Properties/AssemblyInfo.cs
+        $ver = Select-String 'AssemblyVersion\("([^"]+)"\)' src/SqlFluff.Ssms/Properties/AssemblyInfo.cs | % { $_.Matches[0].Groups[1].Value }
+        Write-Output "version=$ver" >> $env:GITHUB_OUTPUT
+        Write-Output "Version: $ver"
+      shell: pwsh
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: v${{ steps.version.outputs.version }}
+        name: Release v${{ steps.version.outputs.version }}
+        body: |
+          SQLFluff extension for SSMS 22
+          
+          **Installation**:
+          1. Download `SqlFluff.Ssms.vsix`
+          2. Double-click to install, or run: `VSIXInstaller.exe SqlFluff.Ssms.vsix`
+          3. Restart SSMS
+          
+          **Requirements**:
+          - SSMS 22.x
+          - Python 3.7+ with SQLFluff: `pip install sqlfluff`
+          
+          See [README](../../README.md) for usage and configuration.
+        files: src/SqlFluff.Ssms/bin/Release/SqlFluff.Ssms.vsix
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
