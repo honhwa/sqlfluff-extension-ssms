@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CommandTable xmlns="http://schemas.microsoft.com/VisualStudio/2005-10-18/CommandTable" xmlns:xs="http://www.w3.org/2001/XMLSchema">
+
+  <Extern href="stdidcmd.h" />
+  <Extern href="vsshlids.h" />
+  <Include href="KnownImageIds.vsct" />
+
+  <Commands package="guidSqlFluffPackage">
+
+    <Menus>
+      <Menu guid="guidSqlFluffCmdSet" id="SqlFluffSubMenu" priority="0x0100" type="Menu">
+        <Parent guid="guidSqlFluffCmdSet" id="ToolsMenuGroup" />
+        <Strings>
+          <ButtonText>SQL&amp;Fluff</ButtonText>
+        </Strings>
+      </Menu>
+      <Menu guid="guidSqlFluffCmdSet" id="SqlFluffToolbar" priority="0x0000" type="Toolbar">
+        <CommandFlag>DefaultDocked</CommandFlag>
+        <Strings>
+          <ButtonText>SQLFluff</ButtonText>
+        </Strings>
+      </Menu>
+    </Menus>
+
+    <Groups>
+      <Group guid="guidSqlFluffCmdSet" id="ToolsMenuGroup" priority="0x0700">
+        <Parent guid="guidSHLMainMenu" id="IDM_VS_MENU_TOOLS" />
+      </Group>
+      <Group guid="guidSqlFluffCmdSet" id="SubMenuActionsGroup" priority="0x0100">
+        <Parent guid="guidSqlFluffCmdSet" id="SqlFluffSubMenu" />
+      </Group>
+      <Group guid="guidSqlFluffCmdSet" id="SubMenuOptionsGroup" priority="0x0200">
+        <Parent guid="guidSqlFluffCmdSet" id="SqlFluffSubMenu" />
+      </Group>
+      <Group guid="guidSqlFluffCmdSet" id="ContextMenuGroup" priority="0x0600">
+        <Parent guid="guidSHLMainMenu" id="IDM_VS_CTXT_CODEWIN" />
+      </Group>
+      <Group guid="guidSqlFluffCmdSet" id="ToolbarGroup" priority="0x0000">
+        <Parent guid="guidSqlFluffCmdSet" id="SqlFluffToolbar" />
+      </Group>
+    </Groups>
+
+    <Buttons>
+      <Button guid="guidSqlFluffCmdSet" id="cmdidLint" priority="0x0100" type="Button">
+        <Parent guid="guidSqlFluffCmdSet" id="SubMenuActionsGroup" />
+        <Icon guid="ImageCatalogGuid" id="ValidateDocument" />
+        <CommandFlag>IconIsMoniker</CommandFlag>
+        <Strings>
+          <ButtonText>&amp;Lint Document</ButtonText>
+          <ToolTipText>Run SQLFluff lint on the active SQL document</ToolTipText>
+        </Strings>
+      </Button>
+
+      <Button guid="guidSqlFluffCmdSet" id="cmdidFix" priority="0x0101" type="Button">
+        <Parent guid="guidSqlFluffCmdSet" id="SubMenuActionsGroup" />
+        <Icon guid="ImageCatalogGuid" id="FormatDocument" />
+        <CommandFlag>IconIsMoniker</CommandFlag>
+        <Strings>
+          <ButtonText>&amp;Fix / Format (Selection or Document)</ButtonText>
+          <ToolTipText>Apply SQLFluff fixes to the selection, or to the whole document when nothing is selected</ToolTipText>
+        </Strings>
+      </Button>
+
+      <Button guid="guidSqlFluffCmdSet" id="cmdidClear" priority="0x0102" type="Button">
+        <Parent guid="guidSqlFluffCmdSet" id="SubMenuActionsGroup" />
+        <Icon guid="ImageCatalogGuid" id="ClearWindowContent" />
+        <CommandFlag>IconIsMoniker</CommandFlag>
+        <Strings>
+          <ButtonText>&amp;Clear Diagnostics</ButtonText>
+          <ToolTipText>Remove SQLFluff diagnostics for the active document</ToolTipText>
+        </Strings>
+      </Button>
+
+      <Button guid="guidSqlFluffCmdSet" id="cmdidOptions" priority="0x0100" type="Button">
+        <Parent guid="guidSqlFluffCmdSet" id="SubMenuOptionsGroup" />
+        <Icon guid="ImageCatalogGuid" id="Settings" />
+        <CommandFlag>IconIsMoniker</CommandFlag>
+        <Strings>
+          <ButtonText>&amp;Options...</ButtonText>
+          <ToolTipText>Configure the SQLFluff extension</ToolTipText>
+        </Strings>
+      </Button>
+    </Buttons>
+
+  </Commands>
+
+  <CommandPlacements>
+    <CommandPlacement guid="guidSqlFluffCmdSet" id="cmdidLint" priority="0x0100">
+      <Parent guid="guidSqlFluffCmdSet" id="ContextMenuGroup" />
+    </CommandPlacement>
+    <CommandPlacement guid="guidSqlFluffCmdSet" id="cmdidFix" priority="0x0101">
+      <Parent guid="guidSqlFluffCmdSet" id="ContextMenuGroup" />
+    </CommandPlacement>
+    <CommandPlacement guid="guidSqlFluffCmdSet" id="cmdidLint" priority="0x0100">
+      <Parent guid="guidSqlFluffCmdSet" id="ToolbarGroup" />
+    </CommandPlacement>
+    <CommandPlacement guid="guidSqlFluffCmdSet" id="cmdidFix" priority="0x0101">
+      <Parent guid="guidSqlFluffCmdSet" id="ToolbarGroup" />
+    </CommandPlacement>
+    <CommandPlacement guid="guidSqlFluffCmdSet" id="cmdidClear" priority="0x0102">
+      <Parent guid="guidSqlFluffCmdSet" id="ToolbarGroup" />
+    </CommandPlacement>
+  </CommandPlacements>
+
+  <KeyBindings>
+    <KeyBinding guid="guidSqlFluffCmdSet" id="cmdidLint" editor="guidVSStd97" key1="K" mod1="Control" key2="L" mod2="Control Shift" />
+    <KeyBinding guid="guidSqlFluffCmdSet" id="cmdidFix" editor="guidVSStd97" key1="K" mod1="Control" key2="F" mod2="Control Shift" />
+  </KeyBindings>
+
+  <Symbols>
+    <GuidSymbol name="guidSqlFluffPackage" value="{8f1a3d52-6b0c-4d8e-9a47-2c5e7b1f4a90}" />
+
+    <GuidSymbol name="guidSqlFluffCmdSet" value="{3c9e6a17-5d2b-4f83-b1c4-7a0e9d8f2b65}">
+      <IDSymbol name="ToolsMenuGroup" value="0x1000" />
+      <IDSymbol name="SubMenuActionsGroup" value="0x1001" />
+      <IDSymbol name="SubMenuOptionsGroup" value="0x1002" />
+      <IDSymbol name="ContextMenuGroup" value="0x1003" />
+      <IDSymbol name="ToolbarGroup" value="0x1004" />
+      <IDSymbol name="SqlFluffSubMenu" value="0x2000" />
+      <IDSymbol name="SqlFluffToolbar" value="0x2001" />
+      <IDSymbol name="cmdidLint" value="0x0100" />
+      <IDSymbol name="cmdidFix" value="0x0101" />
+      <IDSymbol name="cmdidClear" value="0x0102" />
+      <IDSymbol name="cmdidOptions" value="0x0103" />
+    </GuidSymbol>
+  </Symbols>
+
+</CommandTable>
