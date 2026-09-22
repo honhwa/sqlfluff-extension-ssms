@@ -190,7 +190,7 @@ namespace SqlFluff.Ssms.Services
             }
 
             ApplyMinimalEdit(buffer, target.Start, original, fixedText);
-            OutputLog.SetStatus("SQLFluff: fixes applied.");
+            OutputLog.SetStatus("SQLFluff: fixes applied. Press Ctrl+S to save.");
             await LintAsync(buffer, path, userInitiated: false);
         }
 
