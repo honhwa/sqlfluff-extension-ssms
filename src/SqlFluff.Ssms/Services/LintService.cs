@@ -22,6 +22,10 @@ namespace SqlFluff.Ssms.Services
         {
             public CancellationTokenSource Lint;
             public CancellationTokenSource Debounce;
+
+            // Set once the buffer's last editor view closes; any lint still in flight or scheduled
+            // for it afterwards is discarded instead of re-publishing into the Error List.
+            public bool Closed;
         }
 
         private readonly SqlFluffPackage _package;
@@ -41,6 +45,11 @@ namespace SqlFluff.Ssms.Services
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             BufferState state = _state.GetOrCreateValue(buffer);
+            if (state.Closed)
+            {
+                return;
+            }
+
             state.Debounce?.Cancel();
             var cts = new CancellationTokenSource();
             state.Debounce = cts;
@@ -67,6 +76,17 @@ namespace SqlFluff.Ssms.Services
             await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
 
             BufferState state = _state.GetOrCreateValue(buffer);
+
+            // A user who can run Lint on a buffer has it open, whatever the close tracking says.
+            if (userInitiated)
+            {
+                state.Closed = false;
+            }
+            else if (state.Closed)
+            {
+                return;
+            }
+
             state.Debounce?.Cancel();
             state.Lint?.Cancel();
             var cts = new CancellationTokenSource();
@@ -85,7 +105,7 @@ namespace SqlFluff.Ssms.Services
                 }
                 else
                 {
-                    ClearDiagnostics(buffer, path);
+                    ClearDiagnostics(buffer);
                 }
                 return;
             }
@@ -217,6 +237,7 @@ namespace SqlFluff.Ssms.Services
         public async Task SuppressViolationAsync(ITextBuffer buffer, string path, ITextSnapshot violationSnapshot, Span violationSpan, string ruleCode)
         {
             await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+            BufferOpened(buffer);
 
             if (!buffer.CheckEditAccess())
             {
@@ -415,6 +436,7 @@ namespace SqlFluff.Ssms.Services
             string verbCapitalized = mode == RewriteMode.Format ? "Format" : "Fix";
 
             await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+            BufferOpened(buffer);
 
             if (!buffer.CheckEditAccess())
             {
@@ -559,7 +581,7 @@ namespace SqlFluff.Ssms.Services
             }
         }
 
-        public void Clear(ITextBuffer buffer, string path)
+        public void Clear(ITextBuffer buffer)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             if (_state.TryGetValue(buffer, out BufferState state))
@@ -568,13 +590,35 @@ namespace SqlFluff.Ssms.Services
                 state.Lint?.Cancel();
             }
 
-            ClearDiagnostics(buffer, path);
+            ClearDiagnostics(buffer);
+        }
+
+        // The buffer's last editor view closed: stop any pending/in-flight lint for it, drop its
+        // diagnostics, and refuse further automatic publishes until a view reopens it or the user
+        // runs a command on it.
+        public void BufferClosed(ITextBuffer buffer)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            BufferState state = _state.GetOrCreateValue(buffer);
+            state.Closed = true;
+            state.Debounce?.Cancel();
+            state.Lint?.Cancel();
+            ClearDiagnostics(buffer);
+        }
+
+        public void BufferOpened(ITextBuffer buffer)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (_state.TryGetValue(buffer, out BufferState state))
+            {
+                state.Closed = false;
+            }
         }
 
         public void DocumentClosed(string path)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
-            _errors.Clear(path);
+            _errors.ClearDocument(path);
         }
 
         private int Publish(
@@ -587,14 +631,14 @@ namespace SqlFluff.Ssms.Services
 
             var set = new ViolationSet(snapshot, entries, settings.Severity);
             ViolationStore.Set(buffer, set);
-            _errors.Publish(path, set, entry => NavigateTo(buffer, path, set, entry));
+            _errors.Publish(buffer, path, set, entry => NavigateTo(buffer, path, set, entry));
             return entries.Count;
         }
 
-        private void ClearDiagnostics(ITextBuffer buffer, string path)
+        private void ClearDiagnostics(ITextBuffer buffer)
         {
             ViolationStore.Clear(buffer);
-            _errors.Clear(path);
+            _errors.Clear(buffer);
         }
 
         private void NavigateTo(ITextBuffer buffer, string path, ViolationSet set, ViolationEntry entry)
