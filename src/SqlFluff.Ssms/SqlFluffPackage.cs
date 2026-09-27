@@ -10,7 +10,6 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.VisualStudio;
-using Microsoft.VisualStudio.CommandBars;
 using Microsoft.VisualStudio.ComponentModelHost;
 using Microsoft.VisualStudio.Editor;
 using Microsoft.VisualStudio.Shell;
@@ -27,18 +26,22 @@ namespace SqlFluff.Ssms
 {
     [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
     [InstalledProductRegistration("SQLFluff for SSMS", "SQLFluff linter and formatter integration.", "1.0.0")]
-    [ProvideMenuResource("Menus.ctmenu", 1)]
-    [ProvideOptionPage(typeof(SqlFluffOptionsPage), "SQLFluff", "General", 0, 0, true)]
+    // Bump the version whenever SqlFluffPackage.vsct changes: Visual Studio only re-merges an
+    // extension's menus and toolbars (and applies DefaultDocked to new toolbars) when it changes.
+    [ProvideMenuResource("Menus.ctmenu", 3)]
+    [ProvideSettingsManifest(PackageRelativeManifestFile = @"Options\registration.json")]
     [ProvideAutoLoad(VSConstants.UICONTEXT.ShellInitialized_string, PackageAutoLoadFlags.BackgroundLoad)]
     [Guid(PackageGuids.PackageString)]
     public sealed class SqlFluffPackage : AsyncPackage
     {
+        private ExtensionOptions _options;
+        private InfoBarService _infoBars;
         private ErrorListService _errors;
         private LintService _lint;
         private EditorServices _editor;
         private FolderBatchService _folderBatch;
         private DocumentEvents _documentEvents;
-        private IVsRunningDocumentTable _rdt;
+        private RunningDocumentTable _rdt;
         private uint _rdtCookie;
         private CancellationTokenSource _folderBatchCts;
 
@@ -47,17 +50,32 @@ namespace SqlFluff.Ssms
         internal static SqlFluffPackage Instance { get; private set; }
 
         internal LintService LintService => _lint;
+
+        // Beta builds carry a 4th version component (see CLAUDE.md's Beta channel); show it, since
+        // update checks deliberately compare only the first three.
+        private string DisplayVersion
+        {
+            get
+            {
+                Version version = GetType().Assembly.GetName().Version;
+                return version.Revision > 0 ? version.ToString(4) + " (beta)" : version.ToString(3);
+            }
+        }
         internal EditorServices EditorServices => _editor;
 
         internal SqlFluffSettings GetSettings()
         {
             ThreadHelper.ThrowIfNotOnUIThread();
-            return ((SqlFluffOptionsPage)GetDialogPage(typeof(SqlFluffOptionsPage))).ToSettings();
+            return _options.Read();
         }
 
         protected override async Task InitializeAsync(CancellationToken cancellationToken, IProgress<ServiceProgressData> progress)
         {
             await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+
+            // First, before anything (including MEF components reaching in via Instance) reads settings.
+            _options = await ExtensionOptions.CreateAsync(this, cancellationToken);
+            _infoBars = new InfoBarService(this);
             Instance = this;
 
             var componentModel = (IComponentModel)await GetServiceAsync(typeof(SComponentModel));
@@ -69,7 +87,7 @@ namespace SqlFluff.Ssms
             _errors = new ErrorListService(this, componentModel.GetService<ITableManagerProvider>());
             _lint = new LintService(this, _editor, _errors);
 
-            _rdt = (IVsRunningDocumentTable)await GetServiceAsync(typeof(SVsRunningDocumentTable));
+            _rdt = new RunningDocumentTable(this);
             _folderBatch = new FolderBatchService(this, _rdt, _editor, _lint, _errors);
 
             var commands = await GetServiceAsync(typeof(IMenuCommandService)) as OleMenuCommandService;
@@ -79,10 +97,9 @@ namespace SqlFluff.Ssms
                 AddCommand(commands, PackageIds.CmdFix, (s, e) => RunOnActiveDocument(EditorAction.Fix), requiresSql: true);
                 AddCommand(commands, PackageIds.CmdFormat, (s, e) => RunOnActiveDocument(EditorAction.Format), requiresSql: true);
                 AddCommand(commands, PackageIds.CmdClear, (s, e) => ClearActiveDocument(), requiresSql: true);
-                AddCommand(commands, PackageIds.CmdOptions, (s, e) => ShowOptionPage(typeof(SqlFluffOptionsPage)), requiresSql: false);
+                AddCommand(commands, PackageIds.CmdOptions, (s, e) => OpenOptions(), requiresSql: false);
                 AddCommand(commands, PackageIds.CmdCheckForUpdates, (s, e) => CheckForUpdates(userInitiated: true), requiresSql: false);
                 AddCommand(commands, PackageIds.CmdInstallSqlFluffTool, (s, e) => CheckSqlFluffTool(userInitiated: true), requiresSql: false);
-                AddCommand(commands, PackageIds.CmdSetupMcpServer, (s, e) => CheckMcpServer(userInitiated: true), requiresSql: false);
                 AddCommand(commands, PackageIds.CmdHelp, (s, e) => OpenHelp(), requiresSql: false);
                 AddCommand(commands, PackageIds.CmdSqlFluffHelp, (s, e) => OpenSqlFluffHelp(), requiresSql: false);
                 AddFolderCommand(commands, PackageIds.CmdLintFolder, FolderBatchAction.Lint);
@@ -91,98 +108,31 @@ namespace SqlFluff.Ssms
             }
 
             _documentEvents = new DocumentEvents(this, _rdt, _editor, _lint);
-            _rdt.AdviseRunningDocTableEvents(_documentEvents, out _rdtCookie);
+            _rdtCookie = _rdt.Advise(_documentEvents);
             _documentEvents.AttachToOpenDocuments();
 
-            EnsureToolbarVisibleOnce();
+            OutputLog.Write("SQLFluff for SSMS v" + DisplayVersion + " loaded.");
 
-            // Also visible any time via Tools > Options > SQLFluff > Extension version.
-            OutputLog.Write("SQLFluff for SSMS v" + GetType().Assembly.GetName().Version.ToString(3) + " loaded.");
-
-            // Non-blocking. Sequenced rather than independent fire-and-forget tasks: all three may
-            // call OutputLog.SetStatus, and running them concurrently would let whichever finishes
-            // last silently clobber another's status bar text. The extension's own update notice
-            // (silent unless CheckForUpdatesOnStartup finds something, and never prompts on its
-            // own) goes first, since the sqlfluff tool check that follows may pop a blocking
-            // install/upgrade prompt - the most actionable of the three, since nothing lints at
-            // all until sqlfluff itself is reachable. The MCP server check goes last - it's purely
-            // optional convenience, so it shouldn't get to prompt before something the extension
-            // actually needs to function.
+            // Non-blocking, and sequenced rather than two independent fire-and-forget tasks: both
+            // may call OutputLog.SetStatus, and running them concurrently would let whichever
+            // finishes last silently clobber the other's status bar text. The extension's own
+            // update notice (silent unless it finds something) goes first; the sqlfluff tool check
+            // follows, since its info bar is the most actionable - nothing lints until sqlfluff
+            // itself is reachable.
             JoinableTaskFactory.RunAsync(async () =>
             {
                 SqlFluffSettings startupSettings = GetSettings();
 
-                // Both checks below need "the latest GitHub release" - if either is enabled,
-                // fetch and parse it once here and hand the same in-flight Task to both, rather
-                // than hitting GitHub's unauthenticated, rate-limited API twice for identical data
-                // on every SSMS startup. Awaiting an already-completed Task from a second place is
-                // safe and instant (standard Task<T> behavior), and each check still does its own
-                // independent fetch when invoked manually (Check for Updates.../Set Up MCP Server
-                // for Copilot...).
-                Task<UpdateInfo> latestReleaseTask =
-                    (startupSettings.CheckForUpdatesOnStartup || startupSettings.CheckMcpServerOnStartup)
-                        ? Task.Run(() => ExtensionUpdater.GetLatestReleaseInfoAsync(CancellationToken.None))
-                        : null;
-
                 if (startupSettings.CheckForUpdatesOnStartup)
                 {
-                    await CheckForUpdatesAsync(userInitiated: false, latestReleaseTask);
+                    await CheckForUpdatesAsync(userInitiated: false);
                 }
 
                 if (startupSettings.CheckSqlFluffToolOnStartup)
                 {
                     await CheckSqlFluffAvailabilityAsync(userInitiated: false);
                 }
-
-                if (startupSettings.CheckMcpServerOnStartup)
-                {
-                    await CheckMcpServerAsync(userInitiated: false, latestReleaseTask);
-                }
             }).Task.FileAndForget("sqlfluff/startup-checks");
-        }
-
-        // The toolbar's DefaultDocked CommandFlag in SqlFluffPackage.vsct is supposed to make VS show
-        // it automatically the first time the package loads, but SSMS 22 doesn't reliably honor that
-        // (issue #27 found the same kind of gap for the query editor's context menu - SSMS 22 doesn't
-        // always behave like a plain VS shell for command UI). Force it visible via DTE.CommandBars
-        // once per extension version, then leave the user's own show/hide choice alone until the next
-        // version - gating on the version rather than a plain "ever shown" bool means a user who hid
-        // it deliberately isn't fought every startup, but a release that changes the toolbar (#42
-        // itself added a second button group to it) still gets one fresh chance to surface it instead
-        // of stopping forever after whichever version first showed it.
-        private void EnsureToolbarVisibleOnce()
-        {
-            ThreadHelper.ThrowIfNotOnUIThread();
-            var page = (SqlFluffOptionsPage)GetDialogPage(typeof(SqlFluffOptionsPage));
-            string currentVersion = GetType().Assembly.GetName().Version.ToString(3);
-            if (page.ToolbarShownForVersion == currentVersion)
-            {
-                return;
-            }
-
-            // Broad catch is deliberate: this runs inline in InitializeAsync, so anything left
-            // uncaught fails the whole package load (see DocumentEvents.OnBeforeSave for the same
-            // must-not-fail reasoning). SSMS 22's DTE/CommandBars implementation is exactly the kind
-            // of "doesn't always behave like a plain VS shell" surface where an unexpected exception
-            // type is plausible, not just the handful of COM-ish ones.
-            try
-            {
-                var dte = (EnvDTE.DTE)GetService(typeof(SDTE));
-                var commandBars = (CommandBars)dte.CommandBars;
-                CommandBar toolbar = commandBars["SQLFluff"];
-                toolbar.Visible = true;
-            }
-            catch (Exception ex)
-            {
-                // Only record it "handled" once the user has actually had a chance to see the
-                // toolbar - if showing it failed, keep retrying on future startups rather than
-                // silently giving up with nothing but a buried Output pane line.
-                OutputLog.Write("SQLFluff: couldn't show the toolbar automatically - enable it manually via right-click on any toolbar > SQLFluff. (" + ex.Message + ")");
-                return;
-            }
-
-            page.ToolbarShownForVersion = currentVersion;
-            page.SaveSettingsToStorage();
         }
 
         private void CheckSqlFluffTool(bool userInitiated)
@@ -247,7 +197,7 @@ namespace SqlFluff.Ssms
                     }
 
                     OutputLog.SetStatus("SQLFluff: not found. Install with 'pip install sqlfluff' or set its path in Tools > Options > SQLFluff.");
-                    await OfferInstallSqlFluffToolAsync();
+                    await OfferInstallSqlFluffToolAsync(userInitiated);
                     return;
                 }
 
@@ -259,9 +209,21 @@ namespace SqlFluff.Ssms
             }
         }
 
-        private async Task OfferInstallSqlFluffToolAsync()
+        private async Task OfferInstallSqlFluffToolAsync(bool userInitiated)
         {
             await JoinableTaskFactory.SwitchToMainThreadAsync();
+            if (!userInitiated)
+            {
+                await _infoBars.ShowAsync(
+                    "the SQLFluff Python tool wasn't found, so nothing can be linted yet.",
+                    new (string, Action)[]
+                    {
+                        ("Install with pip", () => RunPipInstallInBackground(upgrade: false)),
+                        ("Open Options", OpenOptions),
+                    });
+                return;
+            }
+
             int result = VsShellUtilities.ShowMessageBox(
                 this,
                 "SQLFluff (the Python linter/formatter this extension relies on) was not found.\n\n" +
@@ -321,6 +283,14 @@ namespace SqlFluff.Ssms
 
             OutputLog.Write("A newer SQLFluff tool release is available on PyPI: v" + latest + " (installed: v" + installedVersion + ").");
 
+            if (!userInitiated)
+            {
+                await _infoBars.ShowAsync(
+                    "SQLFluff tool v" + latest + " is available (you have v" + installedVersion + ").",
+                    new (string, Action)[] { ("Upgrade with pip", () => RunPipInstallInBackground(upgrade: true)) });
+                return;
+            }
+
             int result = VsShellUtilities.ShowMessageBox(
                 this,
                 "A newer version of the SQLFluff tool is available: v" + latest + " (you have v" + installedVersion + ").\n\n" +
@@ -335,6 +305,11 @@ namespace SqlFluff.Ssms
             }
 
             await RunPipInstallAsync(upgrade: true);
+        }
+
+        private void RunPipInstallInBackground(bool upgrade)
+        {
+            JoinableTaskFactory.RunAsync(() => RunPipInstallAsync(upgrade)).Task.FileAndForget("sqlfluff/pip-install");
         }
 
         // Shared by both the "not found" and "outdated" prompts above - the only difference
@@ -387,215 +362,6 @@ namespace SqlFluff.Ssms
             }
         }
 
-        // Guards CheckMcpServerAsync the same way _sqlFluffToolCheckInFlight guards the sqlfluff
-        // tool check - the silent startup check and the manual "Set Up MCP Server..." command
-        // could otherwise both reach InstallAsync concurrently against the same directory.
-        private bool _mcpSetupInFlight;
-
-        private void CheckMcpServer(bool userInitiated)
-        {
-            ThreadHelper.ThrowIfNotOnUIThread();
-            JoinableTaskFactory.RunAsync(() => CheckMcpServerAsync(userInitiated, prefetchedLatestRelease: null)).Task.FileAndForget("sqlfluff/check-mcp-server");
-        }
-
-        // Checks whether a newer SqlFluff.Mcp release is available than what's currently
-        // extracted into McpServerInstaller.ServerDirectory and, if so, offers (single combined
-        // Yes/No prompt) to download it and register it with GitHub Copilot in
-        // %USERPROFILE%\.mcp.json. Mirrors CheckSqlFluffAvailabilityAsync's shape, but unlike
-        // that one, the silent startup path (userInitiated: false) only prompts once per release
-        // version (Options.McpServerOfferedForVersion) rather than every startup - this isn't
-        // something the extension needs to function, unlike the sqlfluff tool itself.
-        // prefetchedLatestRelease - see CheckForUpdatesAsync's doc comment.
-        private async Task CheckMcpServerAsync(bool userInitiated, Task<UpdateInfo> prefetchedLatestRelease)
-        {
-            await JoinableTaskFactory.SwitchToMainThreadAsync();
-            if (_mcpSetupInFlight)
-            {
-                if (userInitiated)
-                {
-                    OutputLog.SetStatus("SQLFluff: already checking/setting up the MCP server - please wait for it to finish.");
-                }
-
-                return;
-            }
-
-            _mcpSetupInFlight = true;
-            try
-            {
-                if (userInitiated)
-                {
-                    OutputLog.SetStatus("SQLFluff: checking for the SqlFluff.Mcp server...");
-                }
-
-                UpdateInfo latest;
-                try
-                {
-                    latest = await (prefetchedLatestRelease ?? Task.Run(() => ExtensionUpdater.GetLatestReleaseInfoAsync(CancellationToken.None)));
-                }
-                catch (UpdateCheckException ex)
-                {
-                    await JoinableTaskFactory.SwitchToMainThreadAsync();
-                    OutputLog.Write("SqlFluff.Mcp release check failed: " + ex.Message);
-                    if (userInitiated)
-                    {
-                        OutputLog.SetStatus("SQLFluff: MCP server check failed - see the SQLFluff output pane.");
-                    }
-
-                    return;
-                }
-
-                await JoinableTaskFactory.SwitchToMainThreadAsync();
-                if (latest == null || string.IsNullOrEmpty(latest.McpZipDownloadUrl))
-                {
-                    if (userInitiated)
-                    {
-                        OutputLog.SetStatus("SQLFluff: no SqlFluff.Mcp release asset found - see the SQLFluff output pane.");
-                        OutputLog.Write("The latest GitHub release has no SqlFluff.Mcp.zip asset attached.");
-                    }
-
-                    return;
-                }
-
-                string localVersion = await Task.Run(() => McpServerInstaller.ReadLocalVersion());
-                bool alreadyUpToDate = localVersion == latest.Version && File.Exists(McpServerInstaller.DllPath);
-
-                if (alreadyUpToDate)
-                {
-                    // Already have the right DLL - no need to download or prompt, but still make
-                    // sure it's registered, regardless of how this run was triggered: the user may
-                    // have removed the .mcp.json entry by hand, or a previous run's registration
-                    // step may have failed after a successful install (e.g. .mcp.json was locked
-                    // at the time) - this is the retry for that, since a silent startup that only
-                    // checked "already offered this version?" would otherwise never try again.
-                    if (userInitiated)
-                    {
-                        OutputLog.Write("SqlFluff.Mcp v" + latest.Version + " is already up to date at " + McpServerInstaller.ServerDirectory + ".");
-                    }
-
-                    await RegisterMcpServerAsync(latest);
-                    return;
-                }
-
-                var page = (SqlFluffOptionsPage)GetDialogPage(typeof(SqlFluffOptionsPage));
-                if (!userInitiated && page.McpServerOfferedForVersion == latest.Version)
-                {
-                    return;
-                }
-
-                int result = VsShellUtilities.ShowMessageBox(
-                    this,
-                    "Set up the SqlFluff MCP server for GitHub Copilot?\n\n" +
-                    "This will download SqlFluff.Mcp.zip (v" + latest.Version + ") from the latest GitHub release, " +
-                    "extract it to " + McpServerInstaller.ServerDirectory + ", and register it in " +
-                    "%USERPROFILE%\\.mcp.json so Copilot can use it (you'll still need to enable its tools " +
-                    "in Copilot Chat's Tools panel - new MCP tools are disabled by default).",
-                    "SQLFluff for SSMS: Set Up MCP Server for Copilot",
-                    OLEMSGICON.OLEMSGICON_QUERY, OLEMSGBUTTON.OLEMSGBUTTON_YESNO, OLEMSGDEFBUTTON.OLEMSGDEFBUTTON_FIRST);
-
-                // Recorded only on an explicit decline for this version - never speculatively on
-                // the accept path (see InstallMcpServerAsync/RegisterMcpServerAsync) - so a
-                // transient install/registration failure doesn't wrongly suppress every future
-                // silent retry.
-                if (result != (int)VSConstants.MessageBoxResult.IDYES)
-                {
-                    page.McpServerOfferedForVersion = latest.Version;
-                    page.SaveSettingsToStorage();
-                    OutputLog.SetStatus("SQLFluff: MCP server not set up. Run SQLFluff > Set Up MCP Server for Copilot... any time.");
-                    return;
-                }
-
-                await InstallMcpServerAsync(latest);
-            }
-            finally
-            {
-                _mcpSetupInFlight = false;
-            }
-        }
-
-        private async Task InstallMcpServerAsync(UpdateInfo latest)
-        {
-            await JoinableTaskFactory.SwitchToMainThreadAsync();
-            OutputLog.Write("Downloading SqlFluff.Mcp v" + latest.Version + "...");
-            OutputLog.SetStatus("SQLFluff: setting up the MCP server... (see the SQLFluff output pane)");
-
-            try
-            {
-                await Task.Run(() => McpServerInstaller.InstallAsync(latest.McpZipDownloadUrl, latest.Version, CancellationToken.None));
-            }
-            catch (McpInstallException ex)
-            {
-                await JoinableTaskFactory.SwitchToMainThreadAsync();
-                OutputLog.Write("SqlFluff.Mcp install failed: " + ex.Message);
-                OutputLog.SetStatus("SQLFluff: MCP server setup failed - see the SQLFluff output pane.");
-                return;
-            }
-
-            await JoinableTaskFactory.SwitchToMainThreadAsync();
-            OutputLog.Write("SqlFluff.Mcp v" + latest.Version + " extracted to " + McpServerInstaller.ServerDirectory + ".");
-            await RegisterMcpServerAsync(latest);
-
-            // Not recorded speculatively before this point (see CheckMcpServerAsync) - but once
-            // the DLL itself is successfully installed, McpServerOfferedForVersion no longer
-            // matters for this version either way: CheckMcpServerAsync's alreadyUpToDate branch
-            // will short-circuit straight past the "already offered?" gate on every future check
-            // (startup or manual) and silently retry RegisterMcpServerAsync on its own if that
-            // part still needs to succeed - so there is nothing left to set here.
-        }
-
-        // Merges a "sqlfluff" entry into %USERPROFILE%\.mcp.json via McpJsonMerger (which leaves
-        // the file untouched if a "sqlfluff" entry already exists or the file doesn't parse).
-        // Split out from InstallMcpServerAsync so the "already up to date" path in
-        // CheckMcpServerAsync can re-verify/repair the registration without re-downloading. Never
-        // touches Options.McpServerOfferedForVersion itself - see the callers for why.
-        private async Task RegisterMcpServerAsync(UpdateInfo latest)
-        {
-            await JoinableTaskFactory.SwitchToMainThreadAsync();
-
-            string mcpJsonPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".mcp.json");
-            string existingJson = null;
-            try
-            {
-                if (File.Exists(mcpJsonPath))
-                {
-                    existingJson = File.ReadAllText(mcpJsonPath);
-                }
-            }
-            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
-            {
-                OutputLog.Write("Could not read " + mcpJsonPath + ": " + ex.Message);
-                OutputLog.SetStatus("SQLFluff: MCP server installed, but couldn't read " + mcpJsonPath + " to register it - see the SQLFluff output pane.");
-                return;
-            }
-
-            string updatedJson = McpJsonMerger.AddSqlFluffServer(existingJson, McpServerInstaller.DllPath);
-            if (updatedJson == null)
-            {
-                if (existingJson != null)
-                {
-                    OutputLog.Write(mcpJsonPath + " already has a 'sqlfluff' server entry (or isn't valid JSON) - left it untouched.");
-                }
-
-                OutputLog.SetStatus("SQLFluff: MCP server ready at " + McpServerInstaller.ServerDirectory + " - " +
-                    (existingJson != null ? "already registered (or " + mcpJsonPath + " couldn't be edited safely)" : "register it manually") +
-                    " and enable it in Copilot's Tools panel.");
-                return;
-            }
-
-            try
-            {
-                File.WriteAllText(mcpJsonPath, updatedJson);
-            }
-            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
-            {
-                OutputLog.Write("Could not write " + mcpJsonPath + ": " + ex.Message);
-                OutputLog.SetStatus("SQLFluff: MCP server ready, but couldn't update " + mcpJsonPath + " - see the SQLFluff output pane.");
-                return;
-            }
-
-            OutputLog.Write("Registered the sqlfluff MCP server in " + mcpJsonPath + ".");
-            OutputLog.SetStatus("SQLFluff: MCP server set up. Enable its tools in Copilot Chat's Tools panel to start using it.");
-        }
-
         // Same repo as ExtensionUpdater's release-check URL, just the human-facing README instead
         // of the GitHub API - Options' per-setting Description text covers the how, this is the
         // one place pointing at the why/architecture (dialects, .sqlfluff discovery, CI parity,
@@ -607,6 +373,19 @@ namespace SqlFluff.Ssms
         // Neither one substitutes for the other: this extension's README doesn't re-document every
         // sqlfluff rule, and sqlfluff's docs don't know this extension exists.
         private const string SqlFluffDocumentationUrl = "https://docs.sqlfluff.com/en/stable/";
+
+        // Unified Settings has no documented API to open a specific category, so this opens
+        // Tools > Options (the standard command) and points the user at the SQLFluff section.
+        private void OpenOptions()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (GetService(typeof(IMenuCommandService)) is OleMenuCommandService commands)
+            {
+                commands.GlobalInvoke(new CommandID(VSConstants.GUID_VSStandardCommandSet97, (int)VSConstants.VSStd97CmdID.ToolsOptions));
+            }
+
+            OutputLog.SetStatus("SQLFluff: search for \"SQLFluff\" in Tools > Options.");
+        }
 
         private void OpenHelp()
         {
@@ -664,17 +443,14 @@ namespace SqlFluff.Ssms
         private void CheckForUpdates(bool userInitiated)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
-            JoinableTaskFactory.RunAsync(() => CheckForUpdatesAsync(userInitiated, prefetchedLatestRelease: null)).Task.FileAndForget("sqlfluff/check-for-updates");
+            JoinableTaskFactory.RunAsync(() => CheckForUpdatesAsync(userInitiated)).Task.FileAndForget("sqlfluff/check-for-updates");
         }
 
         // Checks GitHub for a newer release of the extension itself (not sqlfluff). The silent
         // startup check (userInitiated: false) only ever logs/sets status - it never prompts or
         // downloads anything on its own. The explicit "Check for Updates..." command additionally
-        // offers to download and launch the installer. prefetchedLatestRelease lets
-        // InitializeAsync's startup-checks block share one "latest release" fetch with
-        // CheckMcpServerAsync instead of each doing its own; the manual command always passes null
-        // (fresh, on-demand data).
-        private async Task CheckForUpdatesAsync(bool userInitiated, Task<UpdateInfo> prefetchedLatestRelease)
+        // offers to download and launch the installer.
+        private async Task CheckForUpdatesAsync(bool userInitiated)
         {
             await JoinableTaskFactory.SwitchToMainThreadAsync();
             if (userInitiated)
@@ -686,7 +462,7 @@ namespace SqlFluff.Ssms
             UpdateInfo raw;
             try
             {
-                raw = await (prefetchedLatestRelease ?? Task.Run(() => ExtensionUpdater.GetLatestReleaseInfoAsync(CancellationToken.None)));
+                raw = await Task.Run(() => ExtensionUpdater.GetLatestReleaseInfoAsync(CancellationToken.None));
             }
             catch (UpdateCheckException ex)
             {
@@ -706,7 +482,7 @@ namespace SqlFluff.Ssms
             {
                 if (userInitiated)
                 {
-                    OutputLog.SetStatus("SQLFluff: you're already up to date (v" + installedVersion + ").");
+                    OutputLog.SetStatus("SQLFluff: you're already up to date (v" + DisplayVersion + ").");
                 }
 
                 return;
@@ -968,7 +744,7 @@ namespace SqlFluff.Ssms
                 ThreadHelper.ThrowIfNotOnUIThread();
                 if (_rdt != null && _rdtCookie != 0)
                 {
-                    _rdt.UnadviseRunningDocTableEvents(_rdtCookie);
+                    _rdt.Unadvise(_rdtCookie);
                     _rdtCookie = 0;
                 }
 
